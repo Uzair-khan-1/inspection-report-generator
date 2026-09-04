@@ -18,7 +18,6 @@ Kept intentionally minimal/fast:
 """
 
 import os
-from datetime import date
 
 import streamlit as st
 
@@ -49,6 +48,11 @@ col1, col2 = st.columns(2)
 location = col1.text_input("Building / Location", key="location_input", placeholder="e.g. room near main gate")
 finding = col2.text_input("Finding", key="finding_input", placeholder="e.g. AC leaking water")
 
+col_sev, col_date, col_status = st.columns(3)
+severity = col_sev.selectbox("Category of Severity", ["Low", "Medium", "High"], key="severity_input")
+completed_on = col_date.date_input("Completed On", key="completed_on_input")
+status = col_status.selectbox("Status", ["Open", "Closed"], key="status_input")
+
 col3, col4 = st.columns(2)
 before_photo = col3.file_uploader(
     "Before photo", type=["jpg", "jpeg", "png"], key=f"before_uploader_{st.session_state.uploader_version}"
@@ -67,6 +71,9 @@ if st.button("➕ Add item", type="primary", use_container_width=True):
             {
                 "raw_location": location.strip(),
                 "raw_finding": finding.strip(),
+                "severity": severity,
+                "completed_on": completed_on,
+                "status": status,
                 "before_bytes": before_photo.getvalue(),
                 "after_bytes": after_photo.getvalue(),
             }
@@ -82,10 +89,11 @@ n = len(st.session_state.inspection_items)
 if n:
     st.subheader(f"Items added ({n})")
     for i, it in enumerate(st.session_state.inspection_items):
-        c1, c2, c3 = st.columns([3, 5, 1])
-        c1.markdown(f"**{it['raw_location']}**")
+        c1, c2, c3, c4 = st.columns([3, 4, 2, 1])
+        c1.markdown(f"**#{i + 1} {it['raw_location']}**")
         c2.markdown(it["raw_finding"])
-        if c3.button("🗑️", key=f"del_{i}", help="Remove this item"):
+        c3.caption(f"{it['severity']} · {it['status']} · {it['completed_on']}")
+        if c4.button("🗑️", key=f"del_{i}", help="Remove this item"):
             st.session_state.inspection_items.pop(i)
             st.session_state.report_bytes = None
             st.rerun()
@@ -106,10 +114,11 @@ if n:
                     {
                         "location": c["location"],
                         "finding": c["finding"],
+                        "severity": it["severity"],
                         "before_bytes": it["before_bytes"],
                         "after_bytes": it["after_bytes"],
-                        "completed_on": date.today(),
-                        "status": "Open",
+                        "completed_on": it["completed_on"],
+                        "status": it["status"],
                     }
                 )
 
