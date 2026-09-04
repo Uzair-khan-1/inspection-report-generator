@@ -17,12 +17,15 @@ Template layout (sheet "Report"):
                is fully preserved no matter how many items are added.
 
 Column mapping (as requested):
+  A -> Observation Number     -> auto-numbered 1, 2, 3, ... in item order.
+  B -> Category of Severity   -> "Low" / "Medium" / "High", color-coded.
   C -> Location / Building   -> AI-cleaned location text, then the AI-cleaned
                                  finding text on the line below, in the same cell.
   D -> Findings               -> the BEFORE photo, stretched to fill the entire cell.
   E -> Corrective Action      -> the AFTER photo, stretched to fill the entire cell.
-  F -> Completed On           -> date.
-  G -> Status                 -> text, e.g. "Open" / "Closed".
+  F -> Completed On           -> date, as chosen by the user.
+  G -> Status                 -> "Open" / "Closed", color-coded (already built
+                                  into the template's own conditional formatting).
 
 Photos are resized locally (Pillow) and stretched to exactly cover their
 target cell (width AND height), so every photo -- whatever size/shape it
@@ -43,7 +46,7 @@ from openpyxl.drawing.xdr import XDRPositiveSize2D
 from openpyxl.utils import get_column_letter
 from openpyxl.utils.units import pixels_to_EMU
 from openpyxl.formatting.rule import FormulaRule
-from openpyxl.styles import PatternFill
+from openpyxl.styles import PatternFill, Alignment
 from PIL import Image as PILImage
 
 SHEET_NAME = "Report"
@@ -51,8 +54,12 @@ FIRST_HEADER_ROW = 8      # row of the very first "Location / Building:" header
 BLOCK_SIZE = 2            # header row + data row
 EXISTING_BLOCKS = 3       # the template ships with 3 ready-made blocks (rows 8-13)
 
+OBSERVATION_COL = 1       # A - auto-numbered
+SEVERITY_COL = 2          # B - Low / Medium / High
 FINDINGS_COL = 4          # D - photo (before)
 CORRECTIVE_COL = 5        # E - photo (after)
+
+CENTER_WRAP = Alignment(horizontal="center", vertical="center", wrap_text=True)
 
 HEADER_TEXT = {
     3: "Location / Building: ",
@@ -142,6 +149,24 @@ def _add_status_conditional_formatting(ws, cell_ref):
     )
 
 
+def _add_severity_conditional_formatting(ws, cell_ref):
+    """Color the Category of Severity cell: High = red, Medium = amber,
+    Low = green -- mirrors the same visual language the template already
+    uses for the Status column."""
+    red = PatternFill(start_color="FFFF0000", end_color="FFFF0000", fill_type="solid")
+    amber = PatternFill(start_color="FFFFC000", end_color="FFFFC000", fill_type="solid")
+    green = PatternFill(start_color="FF00B050", end_color="FF00B050", fill_type="solid")
+    ws.conditional_formatting.add(
+        cell_ref, FormulaRule(formula=[f'NOT(ISERROR(SEARCH("HIGH",{cell_ref})))'], fill=red)
+    )
+    ws.conditional_formatting.add(
+        cell_ref, FormulaRule(formula=[f'NOT(ISERROR(SEARCH("MEDIUM",{cell_ref})))'], fill=amber)
+    )
+    ws.conditional_formatting.add(
+        cell_ref, FormulaRule(formula=[f'NOT(ISERROR(SEARCH("LOW",{cell_ref})))'], fill=green)
+    )
+
+
 def _ensure_block(ws, index):
     """Return (header_row, data_row) for the item at `index` (0-based),
     inserting and styling a new block if the template's ready-made blocks
@@ -178,6 +203,7 @@ def generate_report(items, template_path, output_path):
     items: list of dicts, each with:
         location       (str)  - AI-cleaned "Location / Building"
         finding        (str)  - AI-cleaned "Findings" text
+        severity       (str, optional, default = "Low") - "Low"/"Medium"/"High"
         before_bytes   (bytes or None) - BEFORE photo
         after_bytes    (bytes or None) - AFTER photo
         completed_on   (date, optional, default = today)
@@ -197,6 +223,13 @@ def generate_report(items, template_path, output_path):
 
     for i, item in enumerate(items):
         header_row, data_row = _ensure_block(ws, i)
+
+        obs_cell = ws.cell(row=data_row, column=OBSERVATION_COL, value=i + 1)
+        obs_cell.alignment = CENTER_WRAP
+
+        sev_cell = ws.cell(row=data_row, column=SEVERITY_COL, value=item.get("severity") or "Low")
+        sev_cell.alignment = CENTER_WRAP
+        _add_severity_conditional_formatting(ws, f"{get_column_letter(SEVERITY_COL)}{data_row}")
 
         location = item.get("location", "")
         finding = item.get("finding", "")
