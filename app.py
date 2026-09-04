@@ -12,6 +12,9 @@ Kept intentionally minimal/fast:
     clicks "Generate Report"), never per-item, to minimize latency.
   * Photos are resized locally with Pillow and placed automatically -- the
     user never touches Excel directly.
+  * Location/Finding text is KEPT after "Add item" (many observations share
+    the same building/area back-to-back) -- only the photo pickers reset,
+    since a fresh pair of photos is needed for every new item.
 """
 
 import os
@@ -31,40 +34,46 @@ if "inspection_items" not in st.session_state:
     st.session_state.inspection_items = []
 if "report_bytes" not in st.session_state:
     st.session_state.report_bytes = None
+if "uploader_version" not in st.session_state:
+    st.session_state.uploader_version = 0  # bump this to reset only the photo pickers
 
 st.title("📋 AI Inspection Report Generator")
 st.caption("Location → Finding → Before photo → After photo → **Add**. Repeat, then **Generate Report**.")
 
 # --------------------------------------------------------------------------- #
-# Add-item form
+# Add-item inputs
+# (Not wrapped in st.form anymore -- clear_on_submit wiped every field,
+# including the text boxes. Now only the photo pickers reset after Add.)
 # --------------------------------------------------------------------------- #
-with st.form("add_item_form", clear_on_submit=True):
-    col1, col2 = st.columns(2)
-    location = col1.text_input("Building / Location", placeholder="e.g. room near main gate")
-    finding = col2.text_input("Finding", placeholder="e.g. AC leaking water")
+col1, col2 = st.columns(2)
+location = col1.text_input("Building / Location", key="location_input", placeholder="e.g. room near main gate")
+finding = col2.text_input("Finding", key="finding_input", placeholder="e.g. AC leaking water")
 
-    col3, col4 = st.columns(2)
-    before_photo = col3.file_uploader("Before photo", type=["jpg", "jpeg", "png"], key="before_uploader")
-    after_photo = col4.file_uploader("After photo", type=["jpg", "jpeg", "png"], key="after_uploader")
+col3, col4 = st.columns(2)
+before_photo = col3.file_uploader(
+    "Before photo", type=["jpg", "jpeg", "png"], key=f"before_uploader_{st.session_state.uploader_version}"
+)
+after_photo = col4.file_uploader(
+    "After photo", type=["jpg", "jpeg", "png"], key=f"after_uploader_{st.session_state.uploader_version}"
+)
 
-    submitted = st.form_submit_button("➕ Add item", use_container_width=True, type="primary")
-
-    if submitted:
-        if not location.strip() or not finding.strip():
-            st.warning("Please enter both a Location and a Finding.")
-        elif not before_photo or not after_photo:
-            st.warning("Please upload both a Before and an After photo.")
-        else:
-            st.session_state.inspection_items.append(
-                {
-                    "raw_location": location.strip(),
-                    "raw_finding": finding.strip(),
-                    "before_bytes": before_photo.getvalue(),
-                    "after_bytes": after_photo.getvalue(),
-                }
-            )
-            st.session_state.report_bytes = None  # stale, needs regeneration
-            st.rerun()
+if st.button("➕ Add item", type="primary", use_container_width=True):
+    if not location.strip() or not finding.strip():
+        st.warning("Please enter both a Location and a Finding.")
+    elif not before_photo or not after_photo:
+        st.warning("Please upload both a Before and an After photo.")
+    else:
+        st.session_state.inspection_items.append(
+            {
+                "raw_location": location.strip(),
+                "raw_finding": finding.strip(),
+                "before_bytes": before_photo.getvalue(),
+                "after_bytes": after_photo.getvalue(),
+            }
+        )
+        st.session_state.report_bytes = None  # stale, needs regeneration
+        st.session_state.uploader_version += 1  # fresh, empty photo pickers next round
+        st.rerun()
 
 # --------------------------------------------------------------------------- #
 # Pending items list
