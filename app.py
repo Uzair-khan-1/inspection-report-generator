@@ -27,8 +27,8 @@ OUTPUT_PATH = "/tmp/Inspection_Report.xlsx"
 
 st.set_page_config(page_title="AI Inspection Report Generator", page_icon="📋", layout="centered")
 
-if "items" not in st.session_state:
-    st.session_state.items = []
+if "inspection_items" not in st.session_state:
+    st.session_state.inspection_items = []
 if "report_bytes" not in st.session_state:
     st.session_state.report_bytes = None
 
@@ -55,7 +55,7 @@ with st.form("add_item_form", clear_on_submit=True):
         elif not before_photo or not after_photo:
             st.warning("Please upload both a Before and an After photo.")
         else:
-            st.session_state.items.append(
+            st.session_state.inspection_items.append(
                 {
                     "raw_location": location.strip(),
                     "raw_finding": finding.strip(),
@@ -69,15 +69,15 @@ with st.form("add_item_form", clear_on_submit=True):
 # --------------------------------------------------------------------------- #
 # Pending items list
 # --------------------------------------------------------------------------- #
-n = len(st.session_state.items)
+n = len(st.session_state.inspection_items)
 if n:
     st.subheader(f"Items added ({n})")
-    for i, it in enumerate(st.session_state.items):
+    for i, it in enumerate(st.session_state.inspection_items):
         c1, c2, c3 = st.columns([3, 5, 1])
         c1.markdown(f"**{it['raw_location']}**")
         c2.markdown(it["raw_finding"])
         if c3.button("🗑️", key=f"del_{i}", help="Remove this item"):
-            st.session_state.items.pop(i)
+            st.session_state.inspection_items.pop(i)
             st.session_state.report_bytes = None
             st.rerun()
 
@@ -87,12 +87,12 @@ if n:
             # ONE batched AI request for every item's text
             ai_input = [
                 {"location": it["raw_location"], "finding": it["raw_finding"]}
-                for it in st.session_state.items
+                for it in st.session_state.inspection_items
             ]
             cleaned = process_items_with_ai(ai_input)
 
             report_items = []
-            for it, c in zip(st.session_state.items, cleaned):
+            for it, c in zip(st.session_state.inspection_items, cleaned):
                 report_items.append(
                     {
                         "location": c["location"],
