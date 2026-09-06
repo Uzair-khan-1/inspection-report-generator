@@ -1,140 +1,255 @@
 """
-app.py
-------
-AI Inspection Report Generator (Streamlit)
+AI Resume Tailor
+================
+Paste your master resume details and a job description; get back a resume
+tailored to that job -- using a fixed, pre-designed template -- as both
+.docx and .pdf, plus an honest fit analysis. Powered by Groq's free-tier LLM API.
 
-Workflow:  Location -> Finding -> Before Photo -> After Photo -> Add -> Next
-Then:      Generate Report -> Download Excel
-
-Kept intentionally minimal/fast:
-  * No database, no preview pages, no image processing beyond a local resize.
-  * One AI call handles ALL pending items' text at once (only when the user
-    clicks "Generate Report"), never per-item, to minimize latency.
-  * Photos are resized locally with Pillow and placed automatically -- the
-    user never touches Excel directly.
-  * Location/Finding text is KEPT after "Add item" (many observations share
-    the same building/area back-to-back) -- only the photo pickers reset,
-    since a fresh pair of photos is needed for every new item.
+Run locally:   streamlit run app.py
+Deploy:        Streamlit Community Cloud (see README.md)
 """
-
-import os
 
 import streamlit as st
 
-from ai_service import process_items_with_ai
-from excel_processor import generate_report
+from core.config import get_bundled_template_path, get_groq_api_key, get_groq_model
+from core.docx_utils import detect_template_sections, generate_tailored_docx
+from core.groq_client import ResumeTailorError, analyze_and_tailor
+from core.pdf_utils import PdfConversionError, convert_docx_to_pdf, is_libreoffice_available
 
-TEMPLATE_PATH = os.path.join(os.path.dirname(__file__), "assets", "Template.xlsx")
-OUTPUT_PATH = "/tmp/Inspection_Report.xlsx"
+st.set_page_config(page_title="AI Resume Tailor", page_icon="📄", layout="centered")
 
-st.set_page_config(page_title="AI Inspection Report Generator", page_icon="📋", layout="centered")
+VERDICT_COLORS = {
+    "Excellent": "🟢",
+    "Strong": "🟢",
+    "Moderate": "🟡",
+    "Weak": "🟠",
+    "Poor": "🔴",
+}
 
-if "inspection_items" not in st.session_state:
-    st.session_state.inspection_items = []
-if "report_bytes" not in st.session_state:
-    st.session_state.report_bytes = None
-if "uploader_version" not in st.session_state:
-    st.session_state.uploader_version = 0  # bump this to reset only the photo pickers
 
-st.title("📋 AI Inspection Report Generator")
-st.caption("Location → Finding → Before photo → After photo → **Add**. Repeat, then **Generate Report**.")
+@st.cache_data
+def _load_template_bytes() -> bytes:
+    with open(get_bundled_template_path(), "rb") as f:
+        return f.read()
 
-# --------------------------------------------------------------------------- #
-# Add-item inputs
-# (Not wrapped in st.form anymore -- clear_on_submit wiped every field,
-# including the text boxes. Now only the photo pickers reset after Add.)
-# --------------------------------------------------------------------------- #
-col1, col2 = st.columns(2)
-location = col1.text_input("Building / Location", key="location_input", placeholder="e.g. room near main gate")
-finding = col2.text_input("Finding", key="finding_input", placeholder="e.g. AC leaking water")
 
-col_sev, col_date, col_status = st.columns(3)
-severity = col_sev.selectbox("Category of Severity", ["Low", "Medium", "High"], key="severity_input")
-completed_on = col_date.date_input("Completed On", key="completed_on_input")
-status = col_status.selectbox("Status", ["Open", "Closed"], key="status_input")
+@st.cache_data
+def _load_template_sections() -> list[str]:
+    return detect_template_sections(_load_template_bytes())
 
-col3, col4 = st.columns(2)
-before_photo = col3.file_uploader(
-    "Before photo", type=["jpg", "jpeg", "png"], key=f"before_uploader_{st.session_state.uploader_version}"
-)
-after_photo = col4.file_uploader(
-    "After photo", type=["jpg", "jpeg", "png"], key=f"after_uploader_{st.session_state.uploader_version}"
-)
 
-if st.button("➕ Add item", type="primary", use_container_width=True):
-    if not location.strip() or not finding.strip():
-        st.warning("Please enter both a Location and a Finding.")
-    elif not before_photo or not after_photo:
-        st.warning("Please upload both a Before and an After photo.")
-    else:
-        st.session_state.inspection_items.append(
-            {
-                "raw_location": location.strip(),
-                "raw_finding": finding.strip(),
-                "severity": severity,
-                "completed_on": completed_on,
-                "status": status,
-                "before_bytes": before_photo.getvalue(),
-                "after_bytes": after_photo.getvalue(),
-            }
+def _init_state():
+    defaults = {
+        "master_resume_text": "",
+        "job_description": "",
+        "job_details": "",
+        "result": None,        # parsed AI response dict
+        "output_docx": None,   # generated tailored resume bytes
+        "output_pdf": None,    # generated tailored resume PDF bytes
+        "pdf_error": None,
+        "error": None,
+    }
+    for k, v in defaults.items():
+        if k not in st.session_state:
+            st.session_state[k] = v
+
+
+def main():
+    _init_state()
+
+    st.title("📄 AI Resume Tailor")
+    st.caption(
+        "Paste your resume details and a job description, and get a tailored, "
+        "ATS-friendly resume -- as Word and PDF -- with an honest fit analysis."
+    )
+
+    api_key = get_groq_api_key()
+    model = get_groq_model()
+    if not api_key:
+        st.warning(
+            "⚠️ No Groq API key found. Add `GROQ_API_KEY` to a local `.env` file, "
+            "or to your Streamlit Cloud app's **Secrets**. See README.md for details.",
+            icon="⚠️",
         )
-        st.session_state.report_bytes = None  # stale, needs regeneration
-        st.session_state.uploader_version += 1  # fresh, empty photo pickers next round
-        st.rerun()
+    if not is_libreoffice_available():
+        st.info(
+            "ℹ️ LibreOffice isn't detected in this environment, so PDF export will be "
+            "unavailable this session -- the Word (.docx) download will still work. "
+            "See README.md to enable PDF export.",
+            icon="ℹ️",
+        )
 
-# --------------------------------------------------------------------------- #
-# Pending items list
-# --------------------------------------------------------------------------- #
-n = len(st.session_state.inspection_items)
-if n:
-    st.subheader(f"Items added ({n})")
-    for i, it in enumerate(st.session_state.inspection_items):
-        c1, c2, c3, c4 = st.columns([3, 4, 2, 1])
-        c1.markdown(f"**#{i + 1} {it['raw_location']}**")
-        c2.markdown(it["raw_finding"])
-        c3.caption(f"{it['severity']} · {it['status']} · {it['completed_on']}")
-        if c4.button("🗑️", key=f"del_{i}", help="Remove this item"):
-            st.session_state.inspection_items.pop(i)
-            st.session_state.report_bytes = None
-            st.rerun()
+    try:
+        sections = _load_template_sections()
+        st.caption("Using the built-in resume template. Sections it will populate: " + " • ".join(sections))
+    except Exception as e:  # noqa: BLE001
+        st.error(f"Couldn't load the built-in resume template: {e}")
+        st.stop()
+
+    # ---- Step 1: Master resume ----
+    st.header("1. Paste your resume details")
+    st.session_state.master_resume_text = st.text_area(
+        "Your complete, real background -- everything you've ever done. The more "
+        "complete this is, the better the AI can tailor your resume without inventing anything.",
+        value=st.session_state.master_resume_text,
+        height=300,
+        placeholder=(
+            "Paste your full resume content here: name, contact info, summary, skills, "
+            "work experience with dates and bullet points, education, certifications, "
+            "training, languages, etc."
+        ),
+    )
+
+    # ---- Step 2: Job description ----
+    st.header("2. Paste the job description")
+    st.session_state.job_description = st.text_area(
+        "Job description (required)",
+        value=st.session_state.job_description,
+        height=220,
+        placeholder="Paste the full job posting here...",
+    )
+    st.session_state.job_details = st.text_area(
+        "Any other job details (optional)",
+        value=st.session_state.job_details,
+        height=100,
+        placeholder="E.g. company name, seniority level, must-have tools not mentioned above, notes from a recruiter call...",
+    )
+
+    # ---- Step 3: Analyze & Generate ----
+    st.header("3. Analyze & Generate")
+
+    ready = bool(st.session_state.master_resume_text.strip() and st.session_state.job_description.strip())
+    missing = []
+    if not st.session_state.master_resume_text.strip():
+        missing.append("your resume details")
+    if not st.session_state.job_description.strip():
+        missing.append("the job description")
+    if missing and not ready:
+        st.info("Still needed: " + ", ".join(missing) + ".")
+
+    generate_clicked = st.button("✨ Analyze & Generate", type="primary", disabled=not ready)
+
+    if generate_clicked:
+        st.session_state.result = None
+        st.session_state.output_docx = None
+        st.session_state.output_pdf = None
+        st.session_state.pdf_error = None
+        st.session_state.error = None
+
+        with st.spinner("Analyzing the job description and tailoring your resume... this can take up to a minute."):
+            try:
+                data = analyze_and_tailor(
+                    master_resume_text=st.session_state.master_resume_text,
+                    job_description=st.session_state.job_description,
+                    job_details=st.session_state.job_details,
+                    api_key=api_key,
+                    model=model,
+                )
+                st.session_state.result = data
+                try:
+                    docx_bytes = generate_tailored_docx(_load_template_bytes(), data["tailored_resume"])
+                    st.session_state.output_docx = docx_bytes
+                    try:
+                        st.session_state.output_pdf = convert_docx_to_pdf(docx_bytes)
+                    except PdfConversionError as e:
+                        st.session_state.pdf_error = str(e)
+                except Exception as e:  # noqa: BLE001
+                    st.session_state.error = (
+                        "The AI analysis succeeded, but building the final .docx failed: "
+                        f"{e}. Your fit analysis below is still valid -- try generating again."
+                    )
+            except ResumeTailorError as e:
+                st.session_state.error = str(e)
+            except Exception as e:  # noqa: BLE001
+                st.session_state.error = f"Unexpected error: {e}"
+
+    if st.session_state.error:
+        st.error(st.session_state.error)
+
+    # ---- Results ----
+    if st.session_state.result:
+        fit = st.session_state.result.get("fit_analysis", {})
+        st.header("Fit Analysis")
+
+        score = fit.get("fit_score", "?")
+        verdict = fit.get("verdict", "Unknown")
+        icon = VERDICT_COLORS.get(verdict, "⚪")
+
+        col1, col2 = st.columns([1, 2])
+        with col1:
+            st.metric("Fit Score", f"{score}/100")
+        with col2:
+            st.markdown(f"### {icon} {verdict}")
+
+        strengths = fit.get("key_strengths", [])
+        missing_reqs = fit.get("missing_requirements", [])
+        recs = fit.get("recommendations", [])
+
+        if strengths:
+            st.subheader("✅ Key Strengths")
+            for s in strengths:
+                st.markdown(f"- {s}")
+
+        if missing_reqs:
+            st.subheader("⚠️ Missing / Weak Requirements")
+            for m in missing_reqs:
+                st.markdown(f"- {m}")
+
+        if recs:
+            st.subheader("💡 Recommendations")
+            for r in recs:
+                st.markdown(f"- {r}")
+
+        st.header("Download Your Tailored Resume")
+        if st.session_state.output_docx:
+            name_part = (st.session_state.result.get("tailored_resume", {}) or {}).get("name", "").strip()
+            base_name = "".join(c for c in name_part if c.isalnum() or c in " _-").strip().replace(" ", "_") or "tailored_resume"
+
+            dcol, pcol = st.columns(2)
+            with dcol:
+                st.download_button(
+                    "⬇️ Download Word (.docx)",
+                    data=st.session_state.output_docx,
+                    file_name=f"{base_name}.docx",
+                    mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                    type="primary",
+                    use_container_width=True,
+                )
+            with pcol:
+                if st.session_state.output_pdf:
+                    st.download_button(
+                        "⬇️ Download PDF",
+                        data=st.session_state.output_pdf,
+                        file_name=f"{base_name}.pdf",
+                        mime="application/pdf",
+                        use_container_width=True,
+                    )
+                else:
+                    st.button("PDF unavailable", disabled=True, use_container_width=True)
+                    if st.session_state.pdf_error:
+                        st.caption(st.session_state.pdf_error)
+
+            st.caption(
+                "Tip: open the file and do a quick read-through -- the AI never invents "
+                "facts, but always proofread before sending."
+            )
+        else:
+            st.info("Resume document isn't available for this run (see error above).")
 
     st.divider()
-    if st.button("📄 Generate Report", type="primary", use_container_width=True):
-        with st.spinner("Cleaning up text and building your Excel report..."):
-            # ONE batched AI request for every item's text
-            ai_input = [
-                {"location": it["raw_location"], "finding": it["raw_finding"]}
-                for it in st.session_state.inspection_items
-            ]
-            cleaned = process_items_with_ai(ai_input)
-
-            report_items = []
-            for it, c in zip(st.session_state.inspection_items, cleaned):
-                report_items.append(
-                    {
-                        "location": c["location"],
-                        "finding": c["finding"],
-                        "severity": it["severity"],
-                        "before_bytes": it["before_bytes"],
-                        "after_bytes": it["after_bytes"],
-                        "completed_on": it["completed_on"],
-                        "status": it["status"],
-                    }
-                )
-
-            generate_report(report_items, TEMPLATE_PATH, OUTPUT_PATH)
-            with open(OUTPUT_PATH, "rb") as f:
-                st.session_state.report_bytes = f.read()
-
-    if st.session_state.report_bytes:
-        st.success("Report generated!")
-        st.download_button(
-            "⬇️ Download Excel Report",
-            data=st.session_state.report_bytes,
-            file_name="Inspection_Report.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            type="primary",
-            use_container_width=True,
+    with st.expander("About / How this works"):
+        st.markdown(
+            """
+- **Nothing is invented.** The AI is instructed to only use facts, employers, dates,
+  skills, and metrics that already exist in the resume text you paste in. It rewrites
+  and reprioritizes -- it doesn't fabricate.
+- **One fixed template.** This app always outputs using the same built-in resume
+  design, so formatting stays consistent across every job you tailor for.
+- **Nothing is stored.** This app has no database; your resume and job description
+  only exist in memory for this session.
+            """
         )
-else:
-    st.info("No items yet — add your first inspection item above.")
+
+
+if __name__ == "__main__":
+    main()

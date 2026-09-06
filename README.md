@@ -1,103 +1,172 @@
-# 📋 AI Inspection Report Generator
+# 📄 AI Resume Tailor
 
-A very fast, no-frills Streamlit app that turns rough field notes + two
-photos per finding into a properly formatted Excel inspection report —
-using your exact company template.
+Paste your resume details and a job description — get back a tailored, fact-accurate,
+ATS-friendly resume as **both Word (.docx) and PDF**, plus an honest fit analysis.
+Built with **Python + Streamlit + Groq (free LLM API)**.
 
-**Workflow:** Location → Finding → Before photo → After photo → **Add** →
-(repeat) → **Generate Report** → **Download Excel**.
+## What it does
 
-No manual Excel editing, resizing, or repositioning required.
+1. You paste your **resume details** as plain text — your complete, real background.
+   This is the only source of facts the AI is allowed to use.
+2. You paste the **job description** (and any extra notes).
+3. The app calls Groq's LLM to:
+   - Extract required/preferred qualifications, skills, tools, and ATS keywords from
+     the job description.
+   - Compare them against your resume text.
+   - Rewrite and reprioritize your resume content for this specific job — **without
+     inventing** skills, employers, dates, certifications, or metrics.
+   - Produce a **Fit Score (0–100)**, a verdict (Excellent / Strong / Moderate / Weak
+     / Poor), key strengths, missing requirements, and recommendations.
+4. The app populates a **fixed, built-in resume template** (`assets/resume_template.docx`)
+   with the tailored content, reusing that template's own fonts/bullets/heading styles,
+   and gives you both a `.docx` and a `.pdf` to download.
 
----
+### Guardrails built in
 
-## How it works
+- The AI is explicitly instructed to never invent skills, experience, achievements,
+  certifications, employers, education, or metrics — only rephrase and reprioritize
+  what's actually in the resume text you paste.
+- Responses are parsed and schema-validated; malformed AI output is caught and
+  surfaced as a clear error instead of silently producing a broken resume.
+- Nothing is persisted — no database, no server-side storage. Everything lives in
+  the Streamlit session while you use it.
 
-| Step | What happens |
-|---|---|
-| You type a rough location + finding, and upload a Before/After photo | Stored locally in the browser session (nothing saved to disk/DB) |
-| Click **Add item** | Repeat for as many inspection points as you like |
-| Click **Generate Report** | **One** AI request cleans up *all* the text at once (fast, cheap) |
-| — | Photos are resized **locally** (Pillow) and placed into the correct cells, preserving aspect ratio |
-| — | The exact template (`assets/Template.xlsx`) is filled in with `openpyxl`, formatting fully preserved |
-| Click **Download Excel** | Get your finished `.xlsx` report |
+## How template formatting is preserved
 
-### Excel column mapping
-| Column | Content |
-|---|---|
-| C | Location / Building (AI-cleaned) |
-| D | Findings (AI-cleaned text) + **Before** photo |
-| E | Corrective Action → **After** photo |
-| F | Completed On (today's date) |
-| G | Status ("Open" by default — color-codes automatically via the template's built-in conditional formatting) |
+The app treats the built-in template's existing paragraphs as **formatting
+exemplars**: it clones the underlying XML of a template's bullet point (or heading,
+or job-title line) for every new bullet/line it needs to insert, so fonts, bullet
+styles, spacing, and bold/italic formatting carry over automatically — even when your
+tailored resume needs a different number of bullets or jobs than the template
+currently has. If your pasted resume has genuinely relevant content the template has
+no section for, the app adds a new heading in a matching style rather than dropping
+that content.
 
-The template ships with 3 ready-made rows. If you add a 4th+ item, the app
-inserts a new row block and copies the exact same fonts/borders/fills/row
-height, so formatting always matches — no matter how many items you add.
+To use a different template design, replace `assets/resume_template.docx` with your
+own `.docx` (keep the section headings recognizable — e.g. "Professional Summary",
+"Work Experience", "Education" — see `core/docx_utils.py`'s `SECTION_KEYWORDS` for the
+full list of recognized headings, or add your own).
 
-## AI model
+## Project structure
 
-Uses **Groq's free-tier API** with `llama-3.1-8b-instant` — one of the
-fastest hosted LLM endpoints available, so the AI step adds well under a
-second per batch. Only the rough **text** (never photos) is sent, and only
-**one request** covers every pending item.
+```
+resume-tailor/
+├── app.py                     # Streamlit UI + orchestration
+├── assets/
+│   └── resume_template.docx    # the fixed resume design used for every output
+├── core/
+│   ├── config.py               # env / st.secrets loading
+│   ├── prompts.py               # system + user prompt construction
+│   ├── groq_client.py           # Groq API call, JSON parsing/validation, errors
+│   ├── docx_utils.py             # template analysis + tailored .docx generation
+│   └── pdf_utils.py               # .docx -> .pdf conversion via LibreOffice
+├── requirements.txt
+├── packages.txt                # apt packages for Streamlit Cloud (LibreOffice)
+├── .env.example
+├── .streamlit/secrets.toml.example
+├── .gitignore
+└── README.md
+```
 
-- Get a free key at https://console.groq.com/keys
-- If no key is set, or the request fails for any reason, the app
-  automatically falls back to lightly-cleaned versions of your original
-  text and keeps working — it never blocks you.
+## Run locally
 
-## Setup
+**1. Clone and set up a virtual environment**
 
 ```bash
+git clone https://github.com/<your-username>/resume-tailor.git
+cd resume-tailor
+python3 -m venv venv
+source venv/bin/activate      # Windows: venv\Scripts\activate
 pip install -r requirements.txt
 ```
 
-Add your Groq key (either works):
+**2. Install LibreOffice (for PDF export)**
+
+The Word (.docx) download works without this — LibreOffice is only needed for the
+PDF download button.
+
+- **Ubuntu/Debian**: `sudo apt install libreoffice`
+- **macOS**: `brew install --cask libreoffice`
+- **Windows**: download from [libreoffice.org](https://www.libreoffice.org/download/)
+  and make sure `soffice.exe` is on your PATH
+
+**3. Get a free Groq API key**
+
+Sign up at [console.groq.com](https://console.groq.com/keys) and create a key
+(no credit card required).
+
+**4. Configure your API key**
 
 ```bash
-# Option A: environment variable
-export GROQ_API_KEY="your-key-here"
-
-# Option B: Streamlit secrets (create .streamlit/secrets.toml)
-echo 'GROQ_API_KEY = "your-key-here"' > .streamlit/secrets.toml
+cp .env.example .env
 ```
 
-Run locally:
+Edit `.env`:
+
+```
+GROQ_API_KEY=your_actual_key_here
+GROQ_MODEL=openai/gpt-oss-120b
+```
+
+> Model names change over time — check
+> [console.groq.com/docs/models](https://console.groq.com/docs/models) for the
+> current list of models available on the free tier if the default stops working.
+
+**5. Run the app**
 
 ```bash
 streamlit run app.py
 ```
 
-## Deploy on Streamlit Community Cloud
+Open the local URL Streamlit prints (usually `http://localhost:8501`).
 
-1. Push this folder to a GitHub repo (the `assets/Template.xlsx` file must
-   be included — it's the template the app fills in).
-2. On https://share.streamlit.io, create a new app pointing at `app.py`.
-3. In the app's **Settings → Secrets**, add:
+## Deploy to Streamlit Community Cloud
+
+1. Push this project to a **public or private GitHub repo** — including
+   `assets/resume_template.docx` and `packages.txt`.
+2. Go to [share.streamlit.io](https://share.streamlit.io) and click **New app**.
+3. Pick your repo, branch, and set the main file path to `app.py`.
+4. Before (or after) deploying, open **App settings → Secrets** and paste:
+
    ```toml
-   GROQ_API_KEY = "your-key-here"
+   GROQ_API_KEY = "your_actual_key_here"
+   GROQ_MODEL = "openai/gpt-oss-120b"
    ```
-4. Deploy. That's it.
 
-## Project structure
+   (This mirrors `.streamlit/secrets.toml.example` in this repo — never commit a
+   real `secrets.toml` to git.)
+5. Deploy. Streamlit Cloud reads `packages.txt` and installs LibreOffice via apt
+   automatically before your app starts, so PDF export works out of the box — no
+   extra setup needed. The app reads `GROQ_API_KEY` from `st.secrets` automatically
+   on Cloud, and from `.env` locally — no code changes needed either way.
 
-```
-app.py               # Streamlit UI + workflow
-excel_processor.py   # Fills the template: text, photo resize/placement, row insertion
-ai_service.py         # One batched Groq API call + safe local fallback
-assets/Template.xlsx  # Your exact report template (do not rename/move)
-requirements.txt
-README.md
-.gitignore
-```
+## Error handling
 
-## Notes / known limitations
+The app is built to fail gracefully and tell you what went wrong, rather than
+crashing:
 
-- Excel **data-validation dropdown lists** in the template (defined via a
-  newer Excel extension format) are dropped when the file is re-saved by
-  `openpyxl` — this is a library limitation, not a bug in the app. All
-  visible **formatting, colors, and conditional formatting still work
-  perfectly** (see the Status column, which stays red/green automatically).
-- Designed to stay fast and simple on purpose: no database, no OCR/CV, no
-  multi-page previews. If AI cleanup fails, your original text is used as-is.
+- **Empty inputs** (no resume text, no job description) → the "Analyze & Generate"
+  button stays disabled with a note on what's still needed.
+- **Groq API failures** (bad key, rate limit, network issue, service error) → each
+  is caught individually and shown with an actionable message.
+- **Malformed AI responses** (non-JSON, missing fields) → detected via schema
+  validation; you're asked to retry rather than getting a broken resume.
+- **Document generation failures** → caught separately so you still see your fit
+  analysis even if the `.docx` build fails.
+- **PDF conversion failures** (e.g. LibreOffice missing) → caught separately; the
+  `.docx` download still works even if the PDF button is unavailable.
+
+## Limitations
+
+- This app does not use a database — each session is independent and nothing is
+  saved. Refreshing the page clears your inputs.
+- The tailoring quality depends on how much detail your pasted resume text actually
+  contains — the AI cannot tailor what isn't there, by design.
+- All output uses the one built-in template design (`assets/resume_template.docx`).
+  Swap that file to change the look for everyone using this deployment.
+- PDF export requires LibreOffice; on Streamlit Cloud this is handled automatically
+  via `packages.txt`, but local setups need it installed separately.
+
+## License
+
+MIT — use, modify, and deploy freely.
